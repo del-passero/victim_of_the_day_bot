@@ -6,8 +6,9 @@ from datetime import datetime, timedelta
 
 import pytz
 from aiogram import Bot, Dispatcher, types, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandObject
-from aiogram.types import ChatType
+from aiogram.enums import ChatType
 from dotenv import load_dotenv
 
 import config
@@ -22,7 +23,7 @@ if not API_TOKEN:
     raise Exception("Укажите токен бота в .env (BOT_TOKEN=...)")
 
 logging.basicConfig(level=logging.INFO)
-bot = Bot(token=API_TOKEN, parse_mode="HTML")
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
 # ==== Универсальные функции работы с JSON ====
