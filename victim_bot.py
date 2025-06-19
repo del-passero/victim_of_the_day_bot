@@ -49,7 +49,6 @@ def now_in_tz():
     tz_name = config.TIMEZONE
     tz = pytz.timezone(tz_name)
     return datetime.now(tz)
-
 # ==== Статистика ====
 
 def increment_stat(chat_id, user_id):
@@ -173,24 +172,32 @@ def set_reminder_suspend(chat_id, until_date):
         data.pop(str(chat_id), None)
     save_json(config.REMINDER_SUSPEND_FILE, data)
 
-# ==== Проверка доверия ====
-
-async def is_trusted(message: types.Message) -> bool:
-    admins = await bot.get_chat_administrators(message.chat.id)
-    creator = next((a.user for a in admins if a.status == "creator"), None)
-    if not creator:
-        return False
-    if message.from_user.id == creator.id:
-        return True
-    pickers = get_trusted_pickers(message.chat.id)
-    return message.from_user.id in pickers
-
-def get_limit_for_chat(chat_id):
-    s = get_settings(chat_id)
-    if "daily_limit" in s:
-        return s["daily_limit"]
-    return config.DAILY_LIMIT_PER_CHAT
-
+# ==== Универсальный парсер пользователя ====
+async def extract_user_id(message: types.Message):
+    # 1. reply
+    if message.reply_to_message:
+        return message.reply_to_message.from_user.id
+    # 2. text_mention
+    if message.entities:
+        for entity in message.entities:
+            if entity.type == "text_mention":
+                return entity.user.id
+    # 3. @username (mention)
+    if message.entities:
+        for entity in message.entities:
+            if entity.type == "mention":
+                username = message.text[entity.offset+1:entity.offset+entity.length]
+                try:
+                    member = await message.bot.get_chat_member(message.chat.id, username)
+                    return member.user.id
+                except Exception:
+                    continue
+    # 4. user_id любым аргументом (цифры)
+    args = message.text.split()
+    for arg in args[1:]:
+        if arg.isdigit():
+            return int(arg)
+    return None
 # ==== Приветствия и help ====
 
 @dp.message(Command("start"))
@@ -235,13 +242,29 @@ async def help_cmd(message: types.Message):
 
 # ==== Основная жеребьёвка и лимиты ====
 
+def get_limit_for_chat(chat_id):
+    s = get_settings(chat_id)
+    if "daily_limit" in s:
+        return s["daily_limit"]
+    return config.DAILY_LIMIT_PER_CHAT
+
+async def is_trusted(message: types.Message) -> bool:
+    admins = await message.bot.get_chat_administrators(message.chat.id)
+    creator = next((a.user for a in admins if a.status == "creator"), None)
+    if not creator:
+        return False
+    if message.from_user.id == creator.id:
+        return True
+    pickers = get_trusted_pickers(message.chat.id)
+    return message.from_user.id in pickers
+
 @dp.message(Command("victim"))
 async def victim_cmd(message: types.Message):
     if message.chat.type not in [ChatType.SUPERGROUP, ChatType.GROUP]:
         await message.reply("Я работаю только в групповых чатах!")
         return
 
-    admins = await bot.get_chat_administrators(message.chat.id)
+    admins = await message.bot.get_chat_administrators(message.chat.id)
     creator = next((a.user for a in admins if a.status == "creator"), None)
     if not creator:
         await message.reply("Не могу определить владельца группы. Дайте мне права администратора!")
@@ -252,7 +275,7 @@ async def victim_cmd(message: types.Message):
         mentions = []
         for uid in trusted_ids:
             try:
-                member = await bot.get_chat_member(message.chat.id, uid)
+                member = await message.bot.get_chat_member(message.chat.id, uid)
                 mentions.append(member.user.get_mention(as_html=True))
             except Exception:
                 continue
@@ -274,7 +297,7 @@ async def victim_cmd(message: types.Message):
 
     # Получаем всех не-ботов (можно доработать для больших групп)
     members = []
-    async for member in bot.get_chat_members(message.chat.id):
+    async for member in message.bot.get_chat_members(message.chat.id):
         if not member.user.is_bot:
             members.append(member.user)
 
@@ -359,14 +382,13 @@ async def statistics_cmd(message: types.Message):
     rows = []
     for user_id, count in sorted(stats.items(), key=lambda x: -x[1]):
         try:
-            member = await bot.get_chat_member(message.chat.id, int(user_id))
+            member = await message.bot.get_chat_member(message.chat.id, int(user_id))
             mention = member.user.get_mention(as_html=True)
         except Exception:
             mention = f"User {user_id}"
         rows.append(f"{mention} — <b>{count}</b>")
     table = "\n".join(f"{i+1}. {row}" for i, row in enumerate(rows))
     await message.reply(f"<b>Статистика жертв дня:</b>\n\n{table}", parse_mode="HTML")
-
 # ==== /set_limit N ====
 
 @dp.message(Command("set_limit"))
@@ -394,23 +416,14 @@ async def add_picker_cmd(message: types.Message, command: CommandObject):
     if not await is_trusted(message):
         await message.reply("Только владелец или доверенный может добавлять пикеров.")
         return
-    entities = message.entities or []
-    user_id = None
-    admins = await bot.get_chat_administrators(message.chat.id)
-    creator = next((a.user for a in admins if a.status == "creator"), None)
-    for e in entities:
-        if e.type == "mention":
-            try:
-                member = await bot.get_chat_member(message.chat.id, e.user.id)
-                user_id = member.user.id
-                if user_id == creator.id:
-                    await message.reply("Владелец всегда доверенный, не нужно добавлять его вручную.")
-                    return
-                break
-            except Exception:
-                pass
+    user_id = await extract_user_id(message)
     if not user_id:
-        await message.reply("Укажи пользователя: /add_picker @username")
+        await message.reply("Ответьте на сообщение или укажите @username или user_id.")
+        return
+    admins = await message.bot.get_chat_administrators(message.chat.id)
+    creator = next((a.user for a in admins if a.status == "creator"), None)
+    if user_id == creator.id:
+        await message.reply("Владелец всегда доверенный, не нужно добавлять его вручную.")
         return
     add_trusted_picker(message.chat.id, user_id)
     await message.reply("Пикер добавлен!")
@@ -420,23 +433,14 @@ async def del_picker_cmd(message: types.Message, command: CommandObject):
     if not await is_trusted(message):
         await message.reply("Только владелец или доверенный может удалять пикеров.")
         return
-    entities = message.entities or []
-    user_id = None
-    admins = await bot.get_chat_administrators(message.chat.id)
-    creator = next((a.user for a in admins if a.status == "creator"), None)
-    for e in entities:
-        if e.type == "mention":
-            try:
-                member = await bot.get_chat_member(message.chat.id, e.user.id)
-                user_id = member.user.id
-                if user_id == creator.id:
-                    await message.reply("Владелец всегда доверенный, нельзя удалить его из пикеров.")
-                    return
-                break
-            except Exception:
-                pass
+    user_id = await extract_user_id(message)
     if not user_id:
-        await message.reply("Укажи пользователя: /del_picker @username")
+        await message.reply("Ответьте на сообщение или укажите @username или user_id.")
+        return
+    admins = await message.bot.get_chat_administrators(message.chat.id)
+    creator = next((a.user for a in admins if a.status == "creator"), None)
+    if user_id == creator.id:
+        await message.reply("Владелец всегда доверенный, нельзя удалить его из пикеров.")
         return
     del_trusted_picker(message.chat.id, user_id)
     await message.reply("Пикер удалён.")
@@ -450,10 +454,10 @@ async def list_pickers_cmd(message: types.Message):
     mentions = []
     for uid in pickers:
         try:
-            member = await bot.get_chat_member(message.chat.id, uid)
+            member = await message.bot.get_chat_member(message.chat.id, uid)
             mentions.append(member.user.get_mention(as_html=True))
         except Exception:
-            continue
+            mentions.append(str(uid))
     await message.reply("Доверенные пикеры: " + ", ".join(mentions), parse_mode="HTML")
 
 # ==== chance_owner ====
@@ -549,23 +553,13 @@ async def exclude_cmd(message: types.Message, command: CommandObject):
     if not await is_trusted(message):
         await message.reply("Только владелец или доверенный может исключать участников.")
         return
-    entities = message.entities or []
-    user_id = None
-    for e in entities:
-        if e.type == "mention":
-            try:
-                member = await bot.get_chat_member(message.chat.id, e.user.id)
-                user_id = member.user.id
-                break
-            except Exception:
-                pass
+    user_id = await extract_user_id(message)
     if not user_id:
-        await message.reply("Укажи участника через @username.")
+        await message.reply("Ответьте на сообщение или укажите @username или user_id.")
         return
-    # не даём исключить всех
     excl = get_excluded(message.chat.id)
     members = []
-    async for member in bot.get_chat_members(message.chat.id):
+    async for member in message.bot.get_chat_members(message.chat.id):
         if not member.user.is_bot:
             members.append(member.user.id)
     non_excl = [uid for uid in members if uid not in excl and uid != user_id]
@@ -580,18 +574,9 @@ async def include_cmd(message: types.Message, command: CommandObject):
     if not await is_trusted(message):
         await message.reply("Только владелец или доверенный может включать участников.")
         return
-    entities = message.entities or []
-    user_id = None
-    for e in entities:
-        if e.type == "mention":
-            try:
-                member = await bot.get_chat_member(message.chat.id, e.user.id)
-                user_id = member.user.id
-                break
-            except Exception:
-                pass
+    user_id = await extract_user_id(message)
     if not user_id:
-        await message.reply("Укажи участника через @username.")
+        await message.reply("Ответьте на сообщение или укажите @username или user_id.")
         return
     del_excluded(message.chat.id, user_id)
     await message.reply("Участник возвращён в жеребьёвку.")
@@ -605,7 +590,7 @@ async def list_excluded_cmd(message: types.Message):
     mentions = []
     for uid in excl:
         try:
-            member = await bot.get_chat_member(message.chat.id, uid)
+            member = await message.bot.get_chat_member(message.chat.id, uid)
             mentions.append(member.user.get_mention(as_html=True))
         except Exception:
             mentions.append(str(uid))
@@ -696,8 +681,6 @@ async def list_phrases_cmd(message: types.Message, command: CommandObject):
     await message.reply(txt, parse_mode="HTML")
 
 # ==== Планировщик напоминаний ====
-
-import asyncio
 
 async def reminder_scheduler():
     while True:
