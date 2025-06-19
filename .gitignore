@@ -1,5 +1,8 @@
 .env
+*.Zone.Identifier
+*копия*
 __pycache__/
+venv/
 *.pyc
 stats.json
 custom_phrases.json
