@@ -62,8 +62,11 @@ def test_custom_phrases():
     phrases = get_custom_phrases()
     assert "Test victim phrase {mention}" in phrases["victim"]
     assert "Test owner phrase {mention}" in phrases["owner"]
+    
     del_custom_phrase("victim", 0)
-    assert phrases["victim"] == []
+    updated_phrases = get_custom_phrases()
+    assert updated_phrases["victim"] == []
+
 
 def test_statistics():
     chat_id = 555
