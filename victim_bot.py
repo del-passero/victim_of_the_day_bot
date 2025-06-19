@@ -5,11 +5,15 @@ import random
 from datetime import datetime, timedelta
 
 import pytz
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandObject
 from aiogram.enums import ChatType
 from dotenv import load_dotenv
+
+from telethon import TelegramClient
+from telethon.errors.rpcerrorlist import UserIdInvalidError
+from telethon.tl.types import ChannelParticipantCreator, ChannelParticipantAdmin
 
 import config
 from phrases.victim_phrases import VICTIM_PHRASES
@@ -19,14 +23,19 @@ from phrases.only_owner_phrases import ONLY_OWNER_PHRASES
 # ---- Инициализация ----
 load_dotenv()
 API_TOKEN = os.getenv("BOT_TOKEN")
-if not API_TOKEN:
-    raise Exception("Укажите токен бота в .env (BOT_TOKEN=...)")
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH")
+if not (API_TOKEN and API_ID and API_HASH):
+    raise Exception("В .env должны быть BOT_TOKEN, API_ID, API_HASH")
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# ==== Универсальные функции работы с JSON ====
+# Telethon для работы с участниками
+telethon_client = TelegramClient("victim_bot.session", API_ID, API_HASH)
+
+# ==== JSON utils ====
 
 def load_json(file, default=None):
     if default is None:
@@ -43,12 +52,66 @@ def save_json(file, data):
     with open(file, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# ==== Время в TZ ====
-
 def now_in_tz():
-    tz_name = config.TIMEZONE
-    tz = pytz.timezone(tz_name)
+    tz = pytz.timezone(config.TIMEZONE)
     return datetime.now(tz)
+
+# ==== Работа с участниками чата через Telethon ====
+
+async def get_chat_owner_and_members(chat_id):
+    """Вернёт (owner_id, список_юзеров) для чата через Telethon"""
+    await telethon_client.connect()
+    members = []
+    owner_id = None
+    async for p in telethon_client.iter_participants(chat_id):
+        if not p.bot:
+            members.append(p)
+        if getattr(p, "is_creator", False) or isinstance(p.participant, ChannelParticipantCreator):
+            owner_id = p.id
+    # fallback: если не нашли owner, пробуем поискать admin с правом owner
+    if not owner_id:
+        async for p in telethon_client.iter_participants(chat_id):
+            if getattr(p, "is_creator", False):
+                owner_id = p.id
+                break
+    return owner_id, members
+
+async def get_member_by_username(chat_id, username):
+    """Получить участника чата по username через Telethon"""
+    await telethon_client.connect()
+    username = username.lstrip("@")
+    async for user in telethon_client.iter_participants(chat_id, search=username):
+        if user.username and user.username.lower() == username.lower():
+            return user
+    return None
+
+async def get_user_html(user):
+    """HTML-упоминание пользователя"""
+    if user.username:
+        return f"@{user.username}"
+    name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+    return f'<a href="tg://user?id={user.id}">{name}</a>'
+
+# ==== Универсальный парсер пользователя ====
+
+async def extract_user_id(message: types.Message):
+    if message.reply_to_message:
+        return message.reply_to_message.from_user.id
+    entities = message.entities or []
+    for entity in entities:
+        if entity.type == "mention":
+            username = message.text[entity.offset+1:entity.offset+entity.length]
+            member = await get_member_by_username(message.chat.id, username)
+            if member:
+                return member.id
+        elif entity.type == "text_mention" and entity.user:
+            return entity.user.id
+    args = message.text.split()
+    for arg in args[1:]:
+        if arg.isdigit():
+            return int(arg)
+    return None
+
 # ==== Статистика ====
 
 def increment_stat(chat_id, user_id):
@@ -172,33 +235,22 @@ def set_reminder_suspend(chat_id, until_date):
         data.pop(str(chat_id), None)
     save_json(config.REMINDER_SUSPEND_FILE, data)
 
-# ==== Универсальный парсер пользователя ====
-async def extract_user_id(message: types.Message):
-    # 1. reply
-    if message.reply_to_message:
-        return message.reply_to_message.from_user.id
-    # 2. text_mention
-    if message.entities:
-        for entity in message.entities:
-            if entity.type == "text_mention":
-                return entity.user.id
-    # 3. @username (mention)
-    if message.entities:
-        for entity in message.entities:
-            if entity.type == "mention":
-                username = message.text[entity.offset+1:entity.offset+entity.length]
-                try:
-                    member = await message.bot.get_chat_member(message.chat.id, username)
-                    return member.user.id
-                except Exception:
-                    continue
-    # 4. user_id любым аргументом (цифры)
-    args = message.text.split()
-    for arg in args[1:]:
-        if arg.isdigit():
-            return int(arg)
-    return None
-# ==== Приветствия и help ====
+def get_limit_for_chat(chat_id):
+    s = get_settings(chat_id)
+    if "daily_limit" in s:
+        return s["daily_limit"]
+    return config.DAILY_LIMIT_PER_CHAT
+
+# ==== Проверка доверия ====
+
+async def is_trusted(message: types.Message):
+    owner_id, _ = await get_chat_owner_and_members(message.chat.id)
+    if message.from_user.id == owner_id:
+        return True
+    pickers = get_trusted_pickers(message.chat.id)
+    return message.from_user.id in pickers
+
+# ==== Команды бота ====
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
@@ -210,107 +262,57 @@ async def start_cmd(message: types.Message):
 
 @dp.message(Command("help"))
 async def help_cmd(message: types.Message):
-    txt = (
-        "🤖 <b>Жертва дня</b> — бот для фана и распределения задач в группах.\n"
-        "Вот что я умею:\n"
-        "— Выбор случайной 'жертвы дня' с учётом исключённых и доверенных\n"
-        "— Гибкое ограничение на количество жеребьёвок в день\n"
-        "— Управление фразами, исключёнными и доверенными\n"
-        "— Умные напоминания\n"
-        "— Вся статистика по чатам\n\n"
-        "<b>Команды:</b>\n"
-        "/victim — выбрать жертву дня\n"
-        "/statistics — статистика попаданий\n"
-        "/set_limit N — установить лимит жеребьёвок\n"
-        "/add_picker @user — добавить доверенного пикера\n"
-        "/del_picker @user — удалить доверенного пикера\n"
-        "/list_pickers — список доверенных\n"
-        "/chance_owner auto|0.15 — шанс для владельца\n"
-        "/reminder_off N — отключить напоминания на N дней\n"
-        "/reminder_on — включить напоминания\n"
-        "/reminder_time ч м — время напоминания\n"
-        "/reminder_weekends_on|off — напоминать/нет по выходным\n"
-        "/exclude @user — исключить участника\n"
-        "/include @user — вернуть участника\n"
-        "/list_excluded — показать исключённых\n"
-        "/phrases_source victim|owner|only_owner all|file|custom\n"
-        "/add_phrase victim|owner|only_owner текст — добавить фразу\n"
-        "/del_phrase victim|owner|only_owner номер — удалить фразу\n"
-        "/list_phrases victim|owner|only_owner — показать фразы\n"
+    await message.reply(
+        "🤖 <b>Жертва дня</b> — бот для групп. Основные команды:\n"
+        "/victim — жеребьёвка дня\n"
+        "/statistics — кто сколько раз был жертвой\n"
+        "/set_limit N — лимит жеребьёвок\n"
+        "/add_picker, /del_picker, /list_pickers — доверенные пикеры\n"
+        "/exclude, /include, /list_excluded — исключения\n"
+        "/phrases_source, /add_phrase, /del_phrase, /list_phrases — работа с фразами\n"
+        "/reminder_on, /reminder_off, /reminder_time, /reminder_weekends_on, /reminder_weekends_off — напоминания\n",
+        parse_mode="HTML"
     )
-    await message.reply(txt, parse_mode="HTML")
-
-# ==== Основная жеребьёвка и лимиты ====
-
-def get_limit_for_chat(chat_id):
-    s = get_settings(chat_id)
-    if "daily_limit" in s:
-        return s["daily_limit"]
-    return config.DAILY_LIMIT_PER_CHAT
-
-async def is_trusted(message: types.Message) -> bool:
-    admins = await message.bot.get_chat_administrators(message.chat.id)
-    creator = next((a.user for a in admins if a.status == "creator"), None)
-    if not creator:
-        return False
-    if message.from_user.id == creator.id:
-        return True
-    pickers = get_trusted_pickers(message.chat.id)
-    return message.from_user.id in pickers
 
 @dp.message(Command("victim"))
 async def victim_cmd(message: types.Message):
     if message.chat.type not in [ChatType.SUPERGROUP, ChatType.GROUP]:
         await message.reply("Я работаю только в групповых чатах!")
         return
-
-    admins = await message.bot.get_chat_administrators(message.chat.id)
-    creator = next((a.user for a in admins if a.status == "creator"), None)
-    if not creator:
-        await message.reply("Не могу определить владельца группы. Дайте мне права администратора!")
+    owner_id, members = await get_chat_owner_and_members(message.chat.id)
+    if not owner_id:
+        await message.reply("Не могу определить владельца группы.")
         return
-
     if not await is_trusted(message):
-        trusted_ids = [creator.id] + get_trusted_pickers(message.chat.id)
+        trusted_ids = [owner_id] + get_trusted_pickers(message.chat.id)
         mentions = []
         for uid in trusted_ids:
             try:
-                member = await message.bot.get_chat_member(message.chat.id, uid)
-                mentions.append(member.user.get_mention(as_html=True))
+                user = await telethon_client.get_entity(uid)
+                mentions.append(await get_user_html(user))
             except Exception:
-                continue
+                mentions.append(str(uid))
         await message.reply(
-            f"Только {' ,'.join(mentions)} могут назначать жертву!",
+            f"Только {', '.join(mentions)} могут назначать жертву!",
             parse_mode="HTML"
         )
         return
-
-    # Проверка лимита по дням
     settings = get_settings(message.chat.id)
     today = now_in_tz().strftime("%Y-%m-%d")
     limit = get_limit_for_chat(message.chat.id)
     last_run_date = settings.get("last_run_date", "")
     runs_today = settings.get("runs_today", 0)
     if last_run_date == today and runs_today >= limit:
-        await message.reply(f"Сегодня лимит жеребьёвок исчерпан! ({limit}) Попробуйте снова завтра.")
+        await message.reply(f"Сегодня лимит жеребьёвок исчерпан! ({limit}) Попробуйте завтра.")
         return
-
-    # Получаем всех не-ботов (можно доработать для больших групп)
-    members = []
-    async for member in message.bot.get_chat_members(message.chat.id):
-        if not member.user.is_bot:
-            members.append(member.user)
-
     exclude_ids = get_excluded(message.chat.id)
     candidates = [u for u in members if u.id not in exclude_ids]
-
     if len(candidates) < config.MIN_MEMBERS_TO_PICK:
         await message.reply(f"Недостаточно участников для жеребьёвки (нужно хотя бы {config.MIN_MEMBERS_TO_PICK}).")
         return
-
     chance_owner = get_setting(message.chat.id, "chance_owner", "auto")
     if chance_owner == "auto":
-        owner_chance = 1 / len(candidates) if creator.id in [u.id for u in candidates] else 0
+        owner_chance = 1 / len(candidates) if owner_id in [u.id for u in candidates] else 0
     else:
         try:
             owner_chance = float(chance_owner)
@@ -318,21 +320,14 @@ async def victim_cmd(message: types.Message):
                 owner_chance = 0.1
         except Exception:
             owner_chance = 0.1
-
-    candidates_owner = [u for u in candidates if u.id == creator.id]
-    candidates_non_owner = [u for u in candidates if u.id != creator.id]
-
+    candidates_owner = [u for u in candidates if u.id == owner_id]
+    candidates_non_owner = [u for u in candidates if u.id != owner_id]
     if candidates_owner and (random.random() < owner_chance):
         victim = candidates_owner[0]
         phrase_type = "owner"
     else:
-        if not candidates_non_owner:
-            victim = candidates_owner[0]
-            phrase_type = "owner"
-        else:
-            victim = random.choice(candidates_non_owner)
-            phrase_type = "victim"
-
+        victim = random.choice(candidates_non_owner) if candidates_non_owner else candidates_owner[0]
+        phrase_type = "victim"
     phrase_source = get_setting(message.chat.id, "phrase_sources", {}).get(phrase_type, "all")
     file_phrases = {
         "victim": VICTIM_PHRASES,
@@ -348,48 +343,38 @@ async def victim_cmd(message: types.Message):
         pool = custom_phrases
     else:
         pool = file_phrases + custom_phrases
-
     if not pool:
         await message.reply("Нет ни одной фразы для этого типа! Добавьте через /add_phrase")
         return
-
     phrase = random.choice(pool)
-    await message.reply(phrase.format(mention=victim.get_mention(as_html=True)), parse_mode="HTML")
-
-    # Логика лимита: записываем дату и счётчик запусков
+    await message.reply(phrase.format(mention=await get_user_html(victim)), parse_mode="HTML")
     if last_run_date != today:
         runs_today = 1
     else:
         runs_today += 1
     set_setting(message.chat.id, "last_run_date", today)
     set_setting(message.chat.id, "runs_today", runs_today)
-
     increment_stat(message.chat.id, victim.id)
-
-# ==== /statistics ====
 
 @dp.message(Command("statistics"))
 async def statistics_cmd(message: types.Message):
     if message.chat.type not in [ChatType.SUPERGROUP, ChatType.GROUP]:
         await message.reply("Я показываю статистику только в группах!")
         return
-
     stats = get_stats_for_chat(message.chat.id)
     if not stats:
         await message.reply("Пока никто не был жертвой дня в этом чате.")
         return
-
     rows = []
     for user_id, count in sorted(stats.items(), key=lambda x: -x[1]):
         try:
-            member = await message.bot.get_chat_member(message.chat.id, int(user_id))
-            mention = member.user.get_mention(as_html=True)
+            user = await telethon_client.get_entity(int(user_id))
+            mention = await get_user_html(user)
         except Exception:
             mention = f"User {user_id}"
         rows.append(f"{mention} — <b>{count}</b>")
     table = "\n".join(f"{i+1}. {row}" for i, row in enumerate(rows))
     await message.reply(f"<b>Статистика жертв дня:</b>\n\n{table}", parse_mode="HTML")
-# ==== /set_limit N ====
 
 @dp.message(Command("set_limit"))
 async def set_limit_cmd(message: types.Message, command: CommandObject):
@@ -409,8 +394,6 @@ async def set_limit_cmd(message: types.Message, command: CommandObject):
     set_setting(message.chat.id, "daily_limit", n)
     await message.reply(f"Лимит жеребьёвок теперь: {n} раз(а) в сутки.")
 
-# ==== Доверенные пикеры ====
-
 @dp.message(Command("add_picker"))
 async def add_picker_cmd(message: types.Message, command: CommandObject):
     if not await is_trusted(message):
@@ -420,9 +403,8 @@ async def add_picker_cmd(message: types.Message, command: CommandObject):
     if not user_id:
         await message.reply("Ответьте на сообщение или укажите @username или user_id.")
         return
-    admins = await message.bot.get_chat_administrators(message.chat.id)
-    creator = next((a.user for a in admins if a.status == "creator"), None)
-    if user_id == creator.id:
+    owner_id, _ = await get_chat_owner_and_members(message.chat.id)
+    if user_id == owner_id:
         await message.reply("Владелец всегда доверенный, не нужно добавлять его вручную.")
         return
     add_trusted_picker(message.chat.id, user_id)
@@ -437,9 +419,8 @@ async def del_picker_cmd(message: types.Message, command: CommandObject):
     if not user_id:
         await message.reply("Ответьте на сообщение или укажите @username или user_id.")
         return
-    admins = await message.bot.get_chat_administrators(message.chat.id)
-    creator = next((a.user for a in admins if a.status == "creator"), None)
-    if user_id == creator.id:
+    owner_id, _ = await get_chat_owner_and_members(message.chat.id)
+    if user_id == owner_id:
         await message.reply("Владелец всегда доверенный, нельзя удалить его из пикеров.")
         return
     del_trusted_picker(message.chat.id, user_id)
@@ -454,13 +435,11 @@ async def list_pickers_cmd(message: types.Message):
     mentions = []
     for uid in pickers:
         try:
-            member = await message.bot.get_chat_member(message.chat.id, uid)
-            mentions.append(member.user.get_mention(as_html=True))
+            user = await telethon_client.get_entity(uid)
+            mentions.append(await get_user_html(user))
         except Exception:
             mentions.append(str(uid))
     await message.reply("Доверенные пикеры: " + ", ".join(mentions), parse_mode="HTML")
-
-# ==== chance_owner ====
 
 @dp.message(Command("chance_owner"))
 async def chance_owner_cmd(message: types.Message, command: CommandObject):
@@ -488,8 +467,6 @@ async def chance_owner_cmd(message: types.Message, command: CommandObject):
             return
         set_setting(message.chat.id, "chance_owner", v)
         await message.reply(f"Установлен шанс: {v*100:.2f}%")
-
-# ==== Напоминания ====
 
 @dp.message(Command("reminder_off"))
 async def reminder_off_cmd(message: types.Message, command: CommandObject):
@@ -546,8 +523,6 @@ async def reminder_weekends_off_cmd(message: types.Message):
     set_setting(message.chat.id, "reminder_skip_weekends", True)
     await message.reply("Напоминания по выходным выключены.")
 
-# ==== Исключения ====
-
 @dp.message(Command("exclude"))
 async def exclude_cmd(message: types.Message, command: CommandObject):
     if not await is_trusted(message):
@@ -558,11 +533,9 @@ async def exclude_cmd(message: types.Message, command: CommandObject):
         await message.reply("Ответьте на сообщение или укажите @username или user_id.")
         return
     excl = get_excluded(message.chat.id)
-    members = []
-    async for member in message.bot.get_chat_members(message.chat.id):
-        if not member.user.is_bot:
-            members.append(member.user.id)
-    non_excl = [uid for uid in members if uid not in excl and uid != user_id]
+    owner_id, members = await get_chat_owner_and_members(message.chat.id)
+    chat_member_ids = [u.id for u in members]
+    non_excl = [uid for uid in chat_member_ids if uid not in excl and uid != user_id]
     if len(non_excl) < config.MIN_MEMBERS_TO_PICK:
         await message.reply(f"Нельзя исключить, иначе останется слишком мало кандидатов!")
         return
@@ -590,13 +563,11 @@ async def list_excluded_cmd(message: types.Message):
     mentions = []
     for uid in excl:
         try:
-            member = await message.bot.get_chat_member(message.chat.id, uid)
-            mentions.append(member.user.get_mention(as_html=True))
+            user = await telethon_client.get_entity(uid)
+            mentions.append(await get_user_html(user))
         except Exception:
             mentions.append(str(uid))
     await message.reply("Исключены: " + ", ".join(mentions), parse_mode="HTML")
-
-# ==== Работа с фразами ====
 
 @dp.message(Command("phrases_source"))
 async def phrases_source_cmd(message: types.Message, command: CommandObject):
@@ -682,6 +653,8 @@ async def list_phrases_cmd(message: types.Message, command: CommandObject):
 
 # ==== Планировщик напоминаний ====
 
+import asyncio
+
 async def reminder_scheduler():
     while True:
         all_settings = load_json(config.SETTINGS_FILE)
@@ -731,6 +704,7 @@ if __name__ == "__main__":
     import asyncio
 
     async def main():
+        await telethon_client.start()
         await set_bot_commands(bot)
         asyncio.create_task(reminder_scheduler())
         await dp.start_polling(bot)
