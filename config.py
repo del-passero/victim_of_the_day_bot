@@ -17,19 +17,14 @@ TIMEZONE = "Europe/Moscow"
 
 
 # Лимиты
-DAILY_LIMIT_PER_CHAT = 5
+DAILY_LIMIT_PER_CHAT = 1
 MIN_MEMBERS_TO_PICK = 2
-AUTO_RUN_DAYS = 3
+AUTO_RUN_DAYS = 1
 
 # Команды (для меню)
 COMMANDS = [
     {"command": "victim", "description": "Выбрать жертву дня"},
     {"command": "statistics", "description": "Статистика жертв"},
-    {"command": "set_limit", "description": "Установить лимит жеребьевок"},
-    {"command": "set_autorun", "description": "Сколько дней до автозапуска"},
-    {"command": "exclude", "description": "Исключить участника"},
-    {"command": "include", "description": "Вернуть в жеребьевку"},
-    {"command": "list_excluded", "description": "Показать исключённых"},
     {"command": "add_phrase", "description": "Добавить свою фразу"},
     {"command": "del_phrase", "description": "Удалить свою фразу"},
     {"command": "list_phrases", "description": "Все фразы"},

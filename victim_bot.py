@@ -240,32 +240,7 @@ async def start_cmd(message: types.Message):
 async def help_cmd(message: types.Message):
     await message.reply(config.HELP_MESSAGE, parse_mode="HTML")
 
-@dp.message(Command("set_limit"))
-async def set_limit_cmd(message: types.Message, command: CommandObject):
-    try:
-        if not command.args:
-            curr = get_limit_for_chat(message.chat.id)
-            await message.reply(f"Текущий лимит: {curr} раз(а) в сутки.")
-            return
-        n = int(command.args.strip())
-        assert 1 <= n <= 100
-        set_setting(message.chat.id, "daily_limit", n)
-        await message.reply(f"Лимит жеребьёвок теперь: {n} раз(а) в сутки.")
-    except Exception:
-        await message.reply("Пример: /set_limit 2 (целое число от 1 до 100)")
 
-@dp.message(Command("set_autorun"))
-async def set_autorun_cmd(message: types.Message, command: CommandObject):
-    try:
-        if not command.args:
-            await message.reply(f"Текущий срок автозапуска: {get_auto_run_days()} дней.")
-            return
-        n = int(command.args.strip())
-        assert 1 <= n <= 30
-        set_autorun(n)
-        await message.reply(f"Срок автозапуска теперь: {n} дней.")
-    except Exception:
-        await message.reply("Пример: /set_autorun 3 (целое число от 1 до 30)")
 
 @dp.message(Command("add_phrase"))
 async def add_phrase_cmd(message: types.Message, command: CommandObject):
@@ -298,41 +273,7 @@ async def list_phrases_cmd(message: types.Message):
         txt += f"{i}. {s}\n"
     await message.reply(txt, parse_mode="HTML")
 
-@dp.message(Command("exclude"))
-async def exclude_cmd(message: types.Message):
-    user_id = await extract_user_id(message)
-    if not user_id:
-        await message.reply("Ответьте на сообщение участника, которого хотите исключить или укажите @username.")
-        return
-    excl = get_excluded(message.chat.id)
-    users = get_users(message.chat.id)
-    non_excl = [uid for uid in users if uid not in excl and uid != user_id]
-    if len(non_excl) < config.MIN_MEMBERS_TO_PICK:
-        await message.reply(f"Нельзя исключить, иначе останется слишком мало кандидатов!")
-        return
-    add_excluded(message.chat.id, user_id)
-    await message.reply("Участник исключён из жеребьёвки.")
 
-@dp.message(Command("include"))
-async def include_cmd(message: types.Message):
-    user_id = await extract_user_id(message)
-    if not user_id:
-        await message.reply("Ответьте на сообщение участника, которого хотите включить или укажите @username.")
-        return
-    del_excluded(message.chat.id, user_id)
-    await message.reply("Участник возвращён в жеребьёвку.")
-
-@dp.message(Command("list_excluded"))
-async def list_excluded_cmd(message: types.Message):
-    excl = get_excluded(message.chat.id)
-    if not excl:
-        await message.reply("Список исключённых пуст.")
-        return
-    mentions = []
-    for uid in excl:
-        mention = await get_user_mention(message.chat.id, uid)
-        mentions.append(mention)
-    await message.reply("Исключены: " + ", ".join(mentions), parse_mode="HTML")
 
 @dp.message(Command("statistics"))
 async def statistics_cmd(message: types.Message):
