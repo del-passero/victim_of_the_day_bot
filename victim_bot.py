@@ -289,8 +289,11 @@ async def del_phrase_cmd(message: types.Message, command: CommandObject):
 
 @dp.message(Command("list_phrases"))
 async def list_phrases_cmd(message: types.Message):
-    phrases = get_all_phrases(message.chat.id)
-    txt = "<b>Фразы жеребьёвки:</b>\n"
+    phrases = get_custom_phrases(message.chat.id)
+    if not phrases:
+        await message.reply("Пользовательские фразы не добавлены.")
+        return
+    txt = "<b>Пользовательские фразы:</b>\n"
     for i, s in enumerate(phrases):
         txt += f"{i}. {s}\n"
     await message.reply(txt, parse_mode="HTML")

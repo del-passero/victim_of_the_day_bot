@@ -3,8 +3,7 @@
 import os
 
 # Корневая директория для json-файлов
-DATA_DIR = os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
-os.makedirs(DATA_DIR, exist_ok=True)
+DATA_DIR = os.getenv("DATA_DIR") or "/data"
 
 # JSON-файлы
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
