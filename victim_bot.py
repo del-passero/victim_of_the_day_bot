@@ -2,16 +2,17 @@ import logging
 import os
 import json
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
+
 import pytz
 from aiogram import Bot, Dispatcher, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandObject
 from aiogram.enums import ChatType
 from dotenv import load_dotenv
+
 import config
 
-# Убедимся, что директория data существует
 os.makedirs(config.DATA_DIR, exist_ok=True)
 
 from phrases.victim_phrases import VICTIM_PHRASES
@@ -31,7 +32,6 @@ dp = Dispatcher()
 
 # =============== JSON-УТИЛИТЫ ==================
 def load_json(file, default=None):
-    """Загрузить json-файл, вернуть default если файл пуст или не найден."""
     if default is None:
         default = {}
     try:
@@ -44,7 +44,6 @@ def load_json(file, default=None):
         return default
 
 def save_json(file, data):
-    """Сохранить данные в json-файл."""
     try:
         with open(file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -53,13 +52,17 @@ def save_json(file, data):
 
 # =============== ВРЕМЯ ========================
 def now_in_tz():
-    """Текущее время в указанном часовом поясе."""
     tz = pytz.timezone(config.TIMEZONE)
     return datetime.now(tz)
 
+def today_str():
+    return now_in_tz().strftime("%Y-%m-%d")
+
+def is_new_day(old_date):
+    return old_date != today_str()
+
 # =============== СТАТИСТИКА ===================
 def increment_stat(chat_id, user_id):
-    """Добавить одно попадание в статистику."""
     stats = load_json(config.STATS_FILE)
     chat_id = str(chat_id)
     user_id = str(user_id)
@@ -72,43 +75,36 @@ def increment_stat(chat_id, user_id):
     logging.info(f"Статистика: +1 попадание {user_id} в чате {chat_id}")
 
 def get_stats_for_chat(chat_id):
-    """Получить статистику попаданий для чата."""
     stats = load_json(config.STATS_FILE)
     return stats.get(str(chat_id), {})
 
 # =============== УЧАСТНИКИ И ПРОЯВЛЕНИЕ ================
 def get_users(chat_id):
-    """Список user_id проявленных пользователей в чате."""
     data = load_json(config.USERS_FILE)
     return data.get(str(chat_id), [])
 
 def set_users(chat_id, users):
-    """Сохранить список user_id для чата."""
     data = load_json(config.USERS_FILE)
     data[str(chat_id)] = users
     save_json(config.USERS_FILE, data)
     logging.info(f"Проявленные пользователи чата {chat_id}: {users}")
 
 def add_user(chat_id, user_id):
-    """Добавить user_id как проявленного пользователя."""
     users = get_users(chat_id)
     if user_id not in users:
         users.append(user_id)
         set_users(chat_id, users)
 
-# ============= "Проявление" (универсальный обработчик) ============
 @dp.message(lambda msg: msg.chat.type in [ChatType.SUPERGROUP, ChatType.GROUP] and not (msg.text and msg.text.startswith('/')))
 async def mark_user_as_active(message: types.Message):
     add_user(message.chat.id, message.from_user.id)
 
-# ============= КАСТОМНЫЕ ФРАЗЫ (ПО ЧАТАМ) ======================
+# --------------------- КАСТОМНЫЕ ФРАЗЫ ---------------------
 def get_custom_phrases(chat_id):
-    """Получить список пользовательских фраз для конкретного чата."""
     data = load_json(config.CUSTOM_PHRASES_FILE, default={})
     return data.get(str(chat_id), [])
 
 def add_custom_phrase(chat_id, phrase):
-    """Добавить новую фразу в конкретный чат."""
     data = load_json(config.CUSTOM_PHRASES_FILE, default={})
     arr = data.get(str(chat_id), [])
     arr.append(phrase)
@@ -117,7 +113,6 @@ def add_custom_phrase(chat_id, phrase):
     logging.info(f"Добавлена фраза: {phrase} в чате {chat_id}")
 
 def del_custom_phrase(chat_id, idx):
-    """Удалить фразу по индексу в конкретном чате."""
     data = load_json(config.CUSTOM_PHRASES_FILE, default={})
     arr = data.get(str(chat_id), [])
     if 0 <= idx < len(arr):
@@ -129,31 +124,7 @@ def del_custom_phrase(chat_id, idx):
     return False
 
 def get_all_phrases(chat_id):
-    """Получить полный список фраз для чата (стандартные + пользовательские)."""
     return VICTIM_PHRASES + get_custom_phrases(chat_id)
-
-# =============== ИСКЛЮЧЁННЫЕ ==========================
-def get_excluded(chat_id):
-    data = load_json(config.EXCLUDE_FILE)
-    return data.get(str(chat_id), [])
-
-def add_excluded(chat_id, user_id):
-    data = load_json(config.EXCLUDE_FILE)
-    chat_excl = data.get(str(chat_id), [])
-    if user_id not in chat_excl:
-        chat_excl.append(user_id)
-        data[str(chat_id)] = chat_excl
-        save_json(config.EXCLUDE_FILE, data)
-        logging.info(f"Исключён {user_id} из жеребьёвки в чате {chat_id}")
-
-def del_excluded(chat_id, user_id):
-    data = load_json(config.EXCLUDE_FILE)
-    chat_excl = data.get(str(chat_id), [])
-    if user_id in chat_excl:
-        chat_excl.remove(user_id)
-        data[str(chat_id)] = chat_excl
-        save_json(config.EXCLUDE_FILE, data)
-        logging.info(f"Вернул {user_id} в жеребьёвку чата {chat_id}")
 
 # =============== НАСТРОЙКИ ============================
 def get_settings(chat_id):
@@ -166,55 +137,18 @@ def set_setting(chat_id, key, value):
     chat_settings[key] = value
     data[str(chat_id)] = chat_settings
     save_json(config.SETTINGS_FILE, data)
-    logging.info(f"Настройка {key}={value} для чата {chat_id}")
 
 def get_setting(chat_id, key, default=None):
     settings = get_settings(chat_id)
     return settings.get(key, default)
 
-# =============== АВТО-ЗАПУСК ===========================
-def get_autorun():
-    data = load_json(config.AUTORUN_FILE, default={})
-    return data.get("auto_run_days", config.AUTO_RUN_DAYS)
-
-def set_autorun(days):
-    data = load_json(config.AUTORUN_FILE, default={})
-    data["auto_run_days"] = days
-    save_json(config.AUTORUN_FILE, data)
-    logging.info(f"Параметр auto_run_days изменён на {days}")
-
 def get_limit_for_chat(chat_id):
-    s = get_settings(chat_id)
-    return s.get("daily_limit", config.DAILY_LIMIT_PER_CHAT)
-
-def get_auto_run_days():
-    return get_autorun()
+    return config.DAILY_LIMIT_PER_CHAT
 
 # ========== УНИВЕРСАЛЬНЫЙ ПАРСЕР ====================
 async def extract_user_id(message: types.Message):
-    # 1. Reply
     if message.reply_to_message:
         return message.reply_to_message.from_user.id
-    # 2. text_mention
-    if message.entities:
-        for entity in message.entities:
-            if entity.type == "text_mention":
-                return entity.user.id
-    # 3. @username (mention)
-    if message.entities:
-        for entity in message.entities:
-            if entity.type == "mention":
-                username = message.text[entity.offset+1:entity.offset+entity.length]
-                try:
-                    member = await message.bot.get_chat_member(message.chat.id, username)
-                    return member.user.id
-                except Exception:
-                    continue
-    # 4. user_id в аргументах
-    args = message.text.split()
-    for arg in args[1:]:
-        if arg.isdigit():
-            return int(arg)
     return None
 
 async def get_user_mention(chat_id, user_id):
@@ -224,7 +158,7 @@ async def get_user_mention(chat_id, user_id):
         if user.username:
             return f"@{user.username}"
         elif user.full_name:
-            return f"{user.full_name}"
+            return user.full_name
         else:
             return f"User {user_id}"
     except Exception:
@@ -233,14 +167,11 @@ async def get_user_mention(chat_id, user_id):
 # ============= ОБРАБОТЧИКИ КОМАНД ========================
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message):
-    logging.info(f"/start вызвал {message.from_user.id} в чате {message.chat.id}")
     await message.reply(config.WELCOME_GROUP_MESSAGE.format(limit=get_limit_for_chat(message.chat.id)))
 
 @dp.message(Command("help"))
 async def help_cmd(message: types.Message):
     await message.reply(config.HELP_MESSAGE, parse_mode="HTML")
-
-
 
 @dp.message(Command("add_phrase"))
 async def add_phrase_cmd(message: types.Message, command: CommandObject):
@@ -266,14 +197,12 @@ async def del_phrase_cmd(message: types.Message, command: CommandObject):
 async def list_phrases_cmd(message: types.Message):
     phrases = get_custom_phrases(message.chat.id)
     if not phrases:
-        await message.reply("Пользовательские фразы не добавлены.")
+        await message.reply("Пользовательские фразы отсутствуют.")
         return
     txt = "<b>Пользовательские фразы:</b>\n"
     for i, s in enumerate(phrases):
         txt += f"{i}. {s}\n"
     await message.reply(txt, parse_mode="HTML")
-
-
 
 @dp.message(Command("statistics"))
 async def statistics_cmd(message: types.Message):
@@ -291,76 +220,73 @@ async def statistics_cmd(message: types.Message):
 # ============== КОМАНДА /victim ====================
 @dp.message(Command("victim"))
 async def victim_cmd(message: types.Message):
-    logging.info(f"/victim вызвал {message.from_user.id} в чате {message.chat.id}")
+    # Получить список проявленных пользователей
     users = get_users(message.chat.id)
-    exclude_ids = get_excluded(message.chat.id)
-    candidates = [uid for uid in users if uid not in exclude_ids]
-    if len(candidates) < config.MIN_MEMBERS_TO_PICK:
+    if len(users) < config.MIN_MEMBERS_TO_PICK:
         await message.reply(f"Недостаточно участников для жеребьёвки (нужно хотя бы {config.MIN_MEMBERS_TO_PICK}).")
         return
 
     # Проверка лимита по дням
     settings = get_settings(message.chat.id)
-    today = now_in_tz().strftime("%Y-%m-%d")
+    today = today_str()
     limit = get_limit_for_chat(message.chat.id)
     last_run_date = settings.get("last_run_date", "")
     runs_today = settings.get("runs_today", 0)
-    if last_run_date == today and runs_today >= limit:
+    if last_run_date != today:
+        runs_today = 0
+    if runs_today >= limit:
         await message.reply(f"Сегодня лимит жеребьёвок исчерпан! ({limit}) Попробуйте снова завтра.")
         return
 
-    victim_id = random.choice(candidates)
+    # Выбираем жертву
+    victim_id = random.choice(users)
     mention = await get_user_mention(message.chat.id, victim_id)
     is_self = victim_id == message.from_user.id
 
+    # Сообщение жеребьёвки (с "самоистязанием" если self)
     phrases = get_all_phrases(message.chat.id)
-    phrase = random.choice(phrases)
+    phrase = random.choice(phrases) if phrases else "{mention} — жертва дня!"
     if is_self:
         msg = f"Кажется сегодня кто-то займется самоистязанием!\n\n" + phrase.format(mention=mention)
     else:
         msg = phrase.format(mention=mention)
     await message.reply(msg, parse_mode="HTML")
-    logging.info(f"Выбрана жертва дня: {victim_id} ({mention})")
 
-    if last_run_date != today:
-        runs_today = 1
-    else:
-        runs_today += 1
+    # Сохраняем дату и счётчик запусков
     set_setting(message.chat.id, "last_run_date", today)
-    set_setting(message.chat.id, "runs_today", runs_today)
-
+    set_setting(message.chat.id, "runs_today", runs_today + 1)
     increment_stat(message.chat.id, victim_id)
 
 # ========== АВТО-ЗАПУСК ПО ПРОСТОЮ ==================
 import asyncio
 
 async def autorun_scheduler():
-    """Периодически запускает жеребьёвку, если не было команд больше N дней."""
     while True:
         all_settings = load_json(config.SETTINGS_FILE)
         for chat_id, settings in all_settings.items():
-            last_run_date = settings.get("last_run_date")
-            if not last_run_date:
+            last_run_date = settings.get("last_run_date", "")
+            runs_today = settings.get("runs_today", 0)
+            limit = get_limit_for_chat(chat_id)
+            users = get_users(chat_id)
+            if len(users) < config.MIN_MEMBERS_TO_PICK:
                 continue
-            last = datetime.strptime(last_run_date, "%Y-%m-%d")
             now = now_in_tz()
-            days_idle = (now.date() - last.date()).days
-            days_max = get_auto_run_days()
-            if days_idle >= days_max:
-                users = get_users(chat_id)
-                exclude_ids = get_excluded(chat_id)
-                candidates = [uid for uid in users if uid not in exclude_ids]
-                if len(candidates) >= config.MIN_MEMBERS_TO_PICK:
-                    victim_id = random.choice(candidates)
+            # Проверяем дату последней жеребьёвки
+            if not last_run_date or (now - datetime.strptime(last_run_date, "%Y-%m-%d")).total_seconds() >= 86400:
+                # Проверка: не превышен ли лимит за сегодня
+                if last_run_date != today_str():
+                    runs_today = 0
+                if runs_today < limit:
+                    victim_id = random.choice(users)
                     mention = await get_user_mention(chat_id, victim_id)
                     phrases = get_all_phrases(chat_id)
-                    phrase = random.choice(phrases)
+                    phrase = random.choice(phrases) if phrases else "{mention} — жертва дня!"
                     msg = f"{config.AUTO_RUN_MESSAGE}\n\n{phrase.format(mention=mention)}"
                     await bot.send_message(chat_id, msg, parse_mode="HTML")
-                    set_setting(chat_id, "last_run_date", now.strftime("%Y-%m-%d"))
-                    set_setting(chat_id, "runs_today", 1)
+                    set_setting(chat_id, "last_run_date", today_str())
+                    set_setting(chat_id, "runs_today", runs_today + 1)
                     increment_stat(chat_id, victim_id)
-        await asyncio.sleep(3600)  # Проверять раз в час
+        await asyncio.sleep(600)  # Проверять каждые 10 минут
 
 # ========== УСТАНОВКА КОМАНД БОТА ===================
 async def set_bot_commands(bot: Bot):
