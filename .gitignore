@@ -1,12 +1,15 @@
 .env
-*.session
 __pycache__/
-venv/
 *.pyc
+*.pyo
+*.pyd
+venv/
+.idea/
+*.log
+users.json
 stats.json
-custom_phrases.json
-trusted_pickers.json
-settings.json
 exclude.json
-reminder_suspend.json
+settings.json
+custom_phrases.json
+autorun.json
 
