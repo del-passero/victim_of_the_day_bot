@@ -6,10 +6,3 @@ __pycache__/
 venv/
 .idea/
 *.log
-users.json
-stats.json
-exclude.json
-settings.json
-custom_phrases.json
-autorun.json
-

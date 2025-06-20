@@ -1,14 +1,21 @@
 # config.py
 
-TIMEZONE = "Europe/Moscow"
+import os
+
+# Корневая директория для json-файлов
+DATA_DIR = os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # JSON-файлы
-USERS_FILE = "users.json"
-EXCLUDE_FILE = "exclude.json"
-STATS_FILE = "stats.json"
-CUSTOM_PHRASES_FILE = "custom_phrases.json"
-SETTINGS_FILE = "settings.json"
-AUTORUN_FILE = "autorun.json"
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
+EXCLUDE_FILE = os.path.join(DATA_DIR, "exclude.json")
+SETTINGS_FILE = os.path.join(DATA_DIR, "settings.json")
+CUSTOM_PHRASES_FILE = os.path.join(DATA_DIR, "custom_phrases.json")
+STATS_FILE = os.path.join(DATA_DIR, "stats.json")
+AUTORUN_FILE = os.path.join(DATA_DIR, "autorun.json")
+
+TIMEZONE = "Europe/Moscow"
+
 
 # Лимиты
 DAILY_LIMIT_PER_CHAT = 5
