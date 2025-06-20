@@ -2,6 +2,7 @@ import logging
 import os
 import json
 import random
+import pytz
 from datetime import datetime, timedelta
 
 import pytz
@@ -263,6 +264,8 @@ import asyncio
 async def autorun_scheduler():
     while True:
         all_settings = load_json(config.SETTINGS_FILE)
+        tz = pytz.timezone(config.TIMEZONE)
+        now = now_in_tz()
         for chat_id, settings in all_settings.items():
             last_run_date = settings.get("last_run_date", "")
             runs_today = settings.get("runs_today", 0)
@@ -270,9 +273,21 @@ async def autorun_scheduler():
             users = get_users(chat_id)
             if len(users) < config.MIN_MEMBERS_TO_PICK:
                 continue
-            now = now_in_tz()
-            # Проверяем дату последней жеребьёвки
-            if not last_run_date or (now - datetime.strptime(last_run_date, "%Y-%m-%d")).total_seconds() >= 86400:
+
+            # Сравниваем даты с учетом таймзоны
+            should_run = False
+            if not last_run_date:
+                should_run = True
+            else:
+                try:
+                    last_dt = tz.localize(datetime.strptime(last_run_date, "%Y-%m-%d"))
+                    delta = (now - last_dt).total_seconds()
+                    should_run = delta >= 86400
+                except Exception as e:
+                    logging.error(f"Ошибка сравнения времени для чата {chat_id}: {e}")
+                    should_run = False
+
+            if should_run:
                 # Проверка: не превышен ли лимит за сегодня
                 if last_run_date != today_str():
                     runs_today = 0
