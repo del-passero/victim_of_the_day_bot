@@ -274,21 +274,20 @@ async def autorun_scheduler():
             if len(users) < config.MIN_MEMBERS_TO_PICK:
                 continue
 
-            # Сравниваем даты с учетом таймзоны
             should_run = False
             if not last_run_date:
                 should_run = True
             else:
                 try:
-                    last_dt = tz.localize(datetime.strptime(last_run_date, "%Y-%m-%d"))
+                    # ОТКОРРЕКТИРОВАНО! — датируем с tzinfo (локализуем к текущему tz)
+                    last_dt = datetime.strptime(last_run_date, "%Y-%m-%d").replace(tzinfo=now.tzinfo)
                     delta = (now - last_dt).total_seconds()
-                    should_run = delta >= 86400
+                    should_run = delta >= 259200
                 except Exception as e:
                     logging.error(f"Ошибка сравнения времени для чата {chat_id}: {e}")
                     should_run = False
 
             if should_run:
-                # Проверка: не превышен ли лимит за сегодня
                 if last_run_date != today_str():
                     runs_today = 0
                 if runs_today < limit:
@@ -301,7 +300,8 @@ async def autorun_scheduler():
                     set_setting(chat_id, "last_run_date", today_str())
                     set_setting(chat_id, "runs_today", runs_today + 1)
                     increment_stat(chat_id, victim_id)
-        await asyncio.sleep(600)  # Проверять каждые 10 минут
+        await asyncio.sleep(3600)  # Проверять каждые 60 минут
+
 
 # ========== УСТАНОВКА КОМАНД БОТА ===================
 async def set_bot_commands(bot: Bot):
